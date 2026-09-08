@@ -8,5 +8,5 @@ var (
 )
 
 var (
-	ErrorsRequirePodTermination = []error{ErrFailedToStartPeeringState, ErrCannotTruncateLogsBeforeAppliedID}
+	ErrorsRequireManualRecovery = []error{ErrFailedToStartPeeringState, ErrCannotTruncateLogsBeforeAppliedID}
 )

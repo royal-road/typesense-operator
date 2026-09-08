@@ -18,7 +18,7 @@
 
 - Deploy highly-available **Typesense** clusters with a **single declarative YAML manifest**
 - Automates **Typesense** [lifecycle management](https://akyriako.github.io/typesense-operator-docs/docs/getting-started#key-features) (config maps, secrets, volumes, statefulsets, services, ingress or http routes, metrics, scrapers)
-- Automates **Raft quorum [configuration, discovery and recovery](https://akyriako.github.io/typesense-operator-docs/docs/how-it-works/recovering-a-cluster-that-has-lost-quorum)** without additional sidecars or manual interventions
+- Automates **Raft quorum configuration and discovery**, while preserving membership during uncertain health and leaving disaster recovery to a fenced, manual procedure
 - Built with Go & Operator SDK — lightweight, Kubernetes-native, and flexible
 - Community-driven, with plethora of examples for Kind, CCE, AKS, EKS, GCP, and more
 
@@ -211,6 +211,68 @@ spec:
 </details>
 
 You can find more examples and analytical installation instructions in the [Installation](https://akyriako.github.io/typesense-operator-docs/docs/installation/) and [Configuration](https://akyriako.github.io/typesense-operator-docs/docs/crds) guides.
+
+## Quorum safety in this fork
+
+This fork intentionally does **not** recover an existing cluster by automatically
+scaling it down to a singleton and back up. A `/status` timeout, a leaderless
+election, or multiple reported leaders does not establish which Raft history is
+authoritative. Successful `/health` responses do not change that.
+
+- Leaderless or failed status observations leave quorum not ready and are retried.
+  Multiple leaders report an error requiring investigation and fenced recovery.
+- Health or Raft-log errors do not cause the operator to purge running Pods.
+  The operator does not delete PVCs or Raft data as a recovery action.
+- Incomplete peer discovery preserves the existing nodes ConfigMap rather than
+  reducing it to the subset of Pods or endpoints currently visible. Membership
+  updates wait for complete discovery while normal reconciliation can still
+  apply requested workload repairs or recreate a missing headless Service.
+  Actual discovery API errors are reported rather than treated as success.
+  Replacement Pod IPs are updated once the complete set is discovered.
+- Initial deployment still creates the requested number of replicas, including
+  explicitly requested single-node clusters. Ordinary requested scaling and
+  membership updates remain supported; a health failure does not request scaling.
+  Unschedulable Pending Pods may still be recreated without changing membership
+  or deleting their PVCs. Kubernetes container restarts and normal StatefulSet
+  rolling updates are unchanged.
+- The existing `resetPeersOnError` server setting remains unchanged, as do the CRD
+  fields `forceResetPeersConfigOnUpdate` and `incrementalQuorumRecovery`. None
+  enables automatic singleton disaster recovery in this fork.
+
+If quorum does not recover naturally, **fence client writes and competing
+replicas before selecting or restoring any authoritative state**. Preserve all
+replicas' data and backups, investigate the Raft histories, and follow a
+Typesense-version-appropriate manual recovery procedure. Do not treat an arbitrary
+reachable replica, a passing health check, or a temporary scale-down as proof of
+authority. This patch cannot repair histories already diverged by earlier
+recovery attempts; fence and assess such clusters before resuming reconciliation.
+
+### Upgrading from operator 0.3.5
+
+This patch is based on upstream 0.4.1, not 0.3.5, and is not a promise of a
+non-disruptive operator-image-only upgrade:
+
+- Upstream 0.4.1 changed the StatefulSet hash calculation and desired Pod template.
+  Reconciliation can schedule a rolling replacement of otherwise healthy Pods.
+- Default sidecar images changed: healthcheck moved from
+  `akyriako78/typesense-healthcheck:0.1.8` to
+  `quay.io/akyriako/typesense-healthcheck:0.2.0`, and metrics moved to
+  `quay.io/akyriako/typesense-prometheus-exporter:0.1.9`. Existing explicit
+  `spec.healthcheck.image` and `spec.metrics.image` values are respected.
+- New upstream CRD fields include `storage.accessMode`, `securityContext`,
+  `service`, `httpRoutes`, and `forceResetPeersConfigOnUpdate`. An old CRD does
+  not supply their new defaults and may prune those fields. This patch defaults
+  an absent storage access mode to `ReadWriteOnce` when rendering the workload,
+  preserving compatibility with older valid CRs without changing their storage.
+  Explicit `ReadWriteOnce` and `ReadWriteMany` values remain respected.
+- Review CRDs, RBAC, pinned images, and the rendered StatefulSet before rollout.
+  New Gateway API management needs its upstream permissions when that API is
+  installed. Back up data and plan managed-Pod replacement separately from
+  deployment of the operator.
+
+The quorum safety changes add no CRD fields and do not change Typesense server
+code or the on-disk storage layout. Upstream recovery documentation linked
+elsewhere in this README does not override this fork's safety policy.
 
 ## 📚 Documentation
 

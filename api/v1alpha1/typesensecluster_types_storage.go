@@ -20,7 +20,13 @@ type StorageSpec struct {
 
 func (s *TypesenseClusterSpec) GetStorage() StorageSpec {
 	if s.Storage != nil {
-		return *s.Storage
+		storage := *s.Storage
+		// Older CRDs did not define accessMode, so their existing objects have
+		// no API-server default for this field.
+		if storage.AccessMode == "" {
+			storage.AccessMode = "ReadWriteOnce"
+		}
+		return storage
 	}
 
 	return StorageSpec{

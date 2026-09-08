@@ -25,10 +25,9 @@ type NodeStatus struct {
 type ClusterStatus string
 
 const (
-	ClusterStatusOK               ClusterStatus = "OK"
-	ClusterStatusSplitBrain       ClusterStatus = "SPLIT_BRAIN"
-	ClusterStatusNotReady         ClusterStatus = "NOT_READY"
-	ClusterStatusElectionDeadlock ClusterStatus = "ELECTION_DEADLOCK"
+	ClusterStatusOK         ClusterStatus = "OK"
+	ClusterStatusSplitBrain ClusterStatus = "SPLIT_BRAIN"
+	ClusterStatusNotReady   ClusterStatus = "NOT_READY"
 )
 
 type NodeHealthResourceError string
