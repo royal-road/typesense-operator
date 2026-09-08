@@ -99,10 +99,9 @@ func (r *TypesenseClusterReconciler) updateConfigMap(ctx context.Context, ts *ts
 	var sts = &appsv1.StatefulSet{}
 	if err := r.Get(ctx, stsObjectKey, sts); err != nil {
 		if apierrors.IsNotFound(err) {
-			err := r.deleteConfigMap(ctx, cm)
-			if err != nil {
-				return nil, 0, false, err
-			}
+			// Keep existing membership if the workload is temporarily absent.
+			// ReconcileStatefulSet will create it at the requested replica count.
+			return cm, len(strings.Split(cm.Data["nodes"], ",")), false, nil
 		} else {
 			r.logger.Error(err, fmt.Sprintf("unable to fetch statefulset: %s", stsName))
 		}
@@ -124,6 +123,14 @@ func (r *TypesenseClusterReconciler) updateConfigMap(ctx context.Context, ts *ts
 	}
 
 	availableNodes := len(nodes)
+	// Discovery is not a membership decision. Keep the complete existing peer
+	// set until all desired replicas are discoverable, but allow subsequent
+	// phases to repair scheduling or recreate a missing headless Service.
+	desiredReplicas := ptr.Deref(sts.Spec.Replicas, 1)
+	if availableNodes < int(desiredReplicas) {
+		r.logger.Info("incomplete peer discovery; preserving existing membership", "availableNodes", availableNodes, "desiredReplicas", desiredReplicas)
+		return cm, len(strings.Split(cm.Data["nodes"], ",")), false, nil
+	}
 	if availableNodes == 0 {
 		r.logger.V(debugLevel).Info("empty quorum configuration")
 		return nil, 0, false, fmt.Errorf("empty quorum configuration")
@@ -157,15 +164,6 @@ func (r *TypesenseClusterReconciler) updateConfigMap(ctx context.Context, ts *ts
 	}
 
 	return desired, availableNodes, updated, nil
-}
-
-func (r *TypesenseClusterReconciler) deleteConfigMap(ctx context.Context, cm *v1.ConfigMap) error {
-	err := r.Delete(ctx, cm)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // ForcePodsConfigMapUpdate forces a configmap update for all pods in the statefulset
@@ -256,7 +254,7 @@ func (r *TypesenseClusterReconciler) getNodes(ctx context.Context, ts *tsv1alpha
 			LabelSelector: labelSelector,
 		}); err != nil {
 			r.logger.Error(err, "failed to list pods", "statefulset", sts.Name)
-			return getFallbackNodes(nodes)
+			return nil, err
 		}
 
 		for _, pod := range pods.Items {
@@ -305,15 +303,19 @@ func (r *TypesenseClusterReconciler) getNodes(ctx context.Context, ts *tsv1alpha
 		return nil, err
 	}
 
+	seen := make(map[string]bool)
 	for _, s := range eps {
 		for _, e := range s.Endpoints {
-			if len(e.Addresses) > 0 {
+			if len(e.Addresses) > 0 && !seen[e.Addresses[0]] {
 				addr := e.Addresses[0]
+				seen[addr] = true
 				//r.logger.V(debugLevel).Info("discovered slice endpoint", "slice", s.Name, "endpoint", e.Hostname, "address", addr)
 				nodes = append(nodes, fmt.Sprintf("%s:%d:%d", addr, ts.Spec.PeeringPort, ts.Spec.ApiPort))
 			}
 		}
 	}
+
+	sort.Strings(nodes)
 
 	return nodes, nil
 }
@@ -348,24 +350,22 @@ func (r *TypesenseClusterReconciler) getEndpointSlicesForStatefulSet(ctx context
 		}
 	}
 
-	// 3) Filter slices: keep only slices that contain at least one endpoint
-	//    whose IP is still in liveIPs
+	// Only return live endpoints, not unrelated or stale entries in a slice
+	// that happens to also contain a live Pod.
 	var readySlices []discoveryv1.EndpointSlice
 	for _, slice := range sliceList.Items {
-		keep := false
+		endpoints := slice.Endpoints[:0]
 		for _, ep := range slice.Endpoints {
-			// only consider endpoints that reference a Pod and whose IP is still live
 			if ep.TargetRef != nil &&
 				ep.TargetRef.Kind == "Pod" &&
 				len(ep.Addresses) > 0 {
-				ip := ep.Addresses[0]
-				if _, ok := liveIPs[ip]; ok {
-					keep = true
-					break
+				if _, ok := liveIPs[ep.Addresses[0]]; ok {
+					endpoints = append(endpoints, ep)
 				}
 			}
 		}
-		if keep {
+		if len(endpoints) > 0 {
+			slice.Endpoints = endpoints
 			readySlices = append(readySlices, slice)
 		}
 	}
@@ -398,21 +398,4 @@ func (r *TypesenseClusterReconciler) getShortName(raftNodeEndpoint string) strin
 	}
 
 	return host
-}
-
-func (r *TypesenseClusterReconciler) hasBootstrapValues(ts *tsv1alpha1.TypesenseCluster, cm *v1.ConfigMap) (bool, error) {
-	rawNodeslist, ok := cm.Data["nodes"]
-	if !ok || rawNodeslist == "" {
-		err := fmt.Errorf("configmap is missing 'nodes' key")
-		return false, err
-	}
-
-	nodeslist := strings.Split(rawNodeslist, ",")
-	for _, node := range nodeslist {
-		if strings.Contains(node, fmt.Sprintf(ClusterStatefulSet, ts.Name)) {
-			return true, nil
-		}
-	}
-
-	return false, nil
 }

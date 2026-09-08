@@ -45,7 +45,7 @@ func (r *TypesenseClusterReconciler) getNodeStatus(ctx context.Context, httpClie
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		r.logger.Error(err, "error executing node status request", "httpStatusCode", resp.StatusCode, "ip", node.IP.String())
+		return NodeStatus{State: ErrorState}, fmt.Errorf("node status returned HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -63,7 +63,7 @@ func (r *TypesenseClusterReconciler) getNodeStatus(ctx context.Context, httpClie
 		nodeStatus.State = ErrorState
 	}
 
-	contains := r.inspectPodLogs(logs, ErrorsRequirePodTermination...)
+	contains := r.inspectPodLogs(logs, ErrorsRequireManualRecovery...)
 	if contains {
 		nodeStatus.State = ErrorState
 	}
@@ -73,17 +73,14 @@ func (r *TypesenseClusterReconciler) getNodeStatus(ctx context.Context, httpClie
 
 func (r *TypesenseClusterReconciler) getClusterStatus(nodesStatus map[string]NodeStatus) ClusterStatus {
 	leaderNodes := 0
-	notReadyNodes := 0
-	availableNodes := len(nodesStatus)
-	minRequiredNodes := getMinimumRequiredNodes(availableNodes)
-
+	votingNodes := 0
 	for _, nodeStatus := range nodesStatus {
-		if nodeStatus.State == LeaderState {
+		switch nodeStatus.State {
+		case LeaderState:
 			leaderNodes++
-		}
-
-		if nodeStatus.State == NotReadyState || nodeStatus.State == UnreachableState {
-			notReadyNodes++
+			votingNodes++
+		case FollowerState:
+			votingNodes++
 		}
 	}
 
@@ -91,20 +88,9 @@ func (r *TypesenseClusterReconciler) getClusterStatus(nodesStatus map[string]Nod
 		return ClusterStatusSplitBrain
 	}
 
-	if leaderNodes == 0 {
-		if availableNodes <= 1 {
-			return ClusterStatusNotReady
-		} // here is setting as not ready even if the single node returns state ERROR
-		if availableNodes == notReadyNodes {
-			return ClusterStatusNotReady
-		}
-		return ClusterStatusElectionDeadlock
-	}
-
-	if leaderNodes == 1 {
-		if minRequiredNodes > (availableNodes - notReadyNodes) {
-			return ClusterStatusNotReady
-		}
+	// Missing, failed, or leaderless observations are uncertain, not proof of
+	// deadlock. Only recognized leader/follower states count toward quorum.
+	if leaderNodes == 1 && votingNodes >= getMinimumRequiredNodes(len(nodesStatus)) {
 		return ClusterStatusOK
 	}
 
@@ -141,7 +127,7 @@ func (r *TypesenseClusterReconciler) getNodeHealth(ctx context.Context, httpClie
 		return NodeHealth{Ok: false}, nil
 	}
 
-	contains := r.inspectPodLogs(logs, ErrorsRequirePodTermination...)
+	contains := r.inspectPodLogs(logs, ErrorsRequireManualRecovery...)
 	if nodeHealth.Ok && contains {
 		nodeHealth.Ok = false
 	}
@@ -166,7 +152,7 @@ func (r *TypesenseClusterReconciler) getQuorum(ctx context.Context, ts *tsv1alph
 	}
 	nodes := strings.Split(rawNodes, ",")
 	availableNodes := len(nodes)
-	minRequiredNodes := getMinimumRequiredNodes(int(sts.Status.Replicas))
+	minRequiredNodes := getMinimumRequiredNodes(int(ptr.Deref(sts.Spec.Replicas, ts.Spec.Replicas)))
 
 	var pods v1.PodList
 	labelSelector := labels.SelectorFromSet(sts.Spec.Selector.MatchLabels)

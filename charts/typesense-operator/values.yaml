@@ -11,8 +11,8 @@ controllerManager:
         drop:
         - ALL
     image:
-      repository: quay.io/akyriako/typesense-operator
-      tag: 0.4.2
+      repository: docker.io/kanadaj/tyesense-operator
+      tag: 0.4.2-patch1
     imagePullPolicy: IfNotPresent
     resources:
       limits:
